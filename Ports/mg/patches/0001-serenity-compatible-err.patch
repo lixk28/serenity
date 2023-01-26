@@ -1,0 +1,114 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 84b683e..172d63e 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -9,6 +9,7 @@ mg_SOURCES       = basic.c bell.c buffer.c cinfo.c dir.c display.c echo.c 	\
+ 		   kbd.c keymap.c line.c macro.c main.c match.c modes.c		\
+ 		   paragraph.c region.c search.c spawn.c tty.c ttyio.c ttykbd.c	\
+ 		   ttydef.h undo.c util.c version.c window.c word.c yank.c	\
++		   serenity-err.c serenity-err.h	\
+ 		   chrdef.h def.h funmap.h kbd.h key.h macro.h pathnames.h
+ mg_SOURCES      += queue.h tree.h
+ mg_SOURCES      += extensions.c
+diff --git a/src/def.h b/src/def.h
+index fa19d57..5588180 100644
+--- a/src/def.h
++++ b/src/def.h
+@@ -44,6 +44,7 @@
+ #include	<signal.h>
+ #include	<sys/stat.h>
+ #include	<termios.h>		/* struct winsize et al. */
++#include   <sys/ioctl.h>
+ 
+ #ifndef HAVE_STRLCPY
+ size_t  strlcpy(char *dst, const char *src, size_t siz);
+diff --git a/src/dired.c b/src/dired.c
+index 0b3d0f3..ab911b1 100644
+--- a/src/dired.c
++++ b/src/dired.c
+@@ -12,7 +12,7 @@
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include <ctype.h>
+-#include <err.h>
++#include "serenity-err.h"
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
+diff --git a/src/main.c b/src/main.c
+index fac3db8..886b51f 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -6,7 +6,7 @@
+  *	Mainline.
+  */
+ 
+-#include <err.h>
++#include "serenity-err.h"
+ #include <limits.h>
+ #include <locale.h>
+ #include <signal.h>
+diff --git a/src/serenity-err.c b/src/serenity-err.c
+new file mode 100644
+index 0000000..b388a66
+--- /dev/null
++++ b/src/serenity-err.c
+@@ -0,0 +1,27 @@
++#include "serenity-err.h"
++#include <errno.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++void err(int eval, const char *fmt, ...)
++{
++    va_list args;
++    va_start(args, fmt);
++    fprintf(stderr, "%s: ", strerror(errno));
++    vfprintf(stderr, fmt, args);
++    fputc('\n', stderr);
++    va_end(args);
++    exit(eval);
++}
++
++void errx(int eval, const char *fmt, ...)
++{
++    va_list args;
++    va_start(args, fmt);
++    vfprintf(stderr, fmt, args);
++    fputc('\n', stderr);
++    va_end(args);
++    exit(eval);
++}
+diff --git a/src/serenity-err.h b/src/serenity-err.h
+new file mode 100644
+index 0000000..1e2005d
+--- /dev/null
++++ b/src/serenity-err.h
+@@ -0,0 +1,12 @@
++#ifndef ERR_H
++#define ERR_H
++
++// https://man.openbsd.org/err.3
++
++void err(int eval, const char *fmt, ...)
++    __attribute__((format (printf, 2, 3)));
++
++void errx(int eval, const char *fmt, ...)
++    __attribute__((format (printf, 2, 3)));
++
++#endif
+diff --git a/src/tags.c b/src/tags.c
+index cb96b3c..3b89431 100644
+--- a/src/tags.c
++++ b/src/tags.c
+@@ -9,7 +9,7 @@
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <ctype.h>
+-#include <err.h>
++#include "serenity-err.h"
+ #include <errno.h>
+ #include <signal.h>
+ #include <stdio.h>
