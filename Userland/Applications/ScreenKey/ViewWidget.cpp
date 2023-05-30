@@ -83,6 +83,7 @@ ViewWidget::ViewWidget()
         }
         return 0;
     }, "KeyPress Listener"sv);
+    MUST(m_listening_thread->set_priority(sched_get_priority_max(SCHED_FIFO)));
     m_listening_thread->start();
 
     m_clear_keys_timer = MUST(Core::Timer::create_repeating(2000, [this]() {
