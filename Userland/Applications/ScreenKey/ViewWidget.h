@@ -32,6 +32,7 @@ private:
     RefPtr<Gfx::Font const> m_font { Gfx::FontDatabase::default_font() };
 
     int m_keyboard_fd { -1 };
+    int m_pipe_fds[2] { -1 };
     Vector<KeyCode> m_key_codes;
     Threading::Mutex m_key_codes_mutex;
     RefPtr<Core::Timer> m_clear_keys_timer;
