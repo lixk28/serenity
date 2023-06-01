@@ -6,11 +6,9 @@
 
 #include "ViewWidget.h"
 #include <LibCore/EventLoop.h>
+#include <LibCore/System.h>
 #include <LibGUI/Painter.h>
-#include <LibC/fcntl.h>
-#include <LibC/poll.h>
 #include <LibC/sched.h>
-#include <LibC/unistd.h>
 
 REGISTER_WIDGET(ScreenKey, ViewWidget)
 
@@ -18,22 +16,11 @@ namespace ScreenKey {
 
 ViewWidget::ViewWidget()
 {
-    m_keyboard_fd = open(s_keyboard_device_path, O_RDONLY | O_CLOEXEC);
-    VERIFY(m_keyboard_fd >= 0);
+    m_keyboard_fd = MUST(Core::System::open(s_keyboard_device_path, O_RDONLY | O_CLOEXEC));
 
-    int rc = pipe(m_pipe_fds);
-    VERIFY(rc != -1);
-
-    // Make both read and write ends of pipe nonblocking.
-    auto make_fd_non_blocking = [](int fd) {
-        int flags = fcntl(fd, F_GETFL);
-        VERIFY(flags != -1);
-        flags |= O_NONBLOCK;
-        int rc = fcntl(fd, F_SETFL, flags);
-        VERIFY(rc != -1);
-    };
-    make_fd_non_blocking(m_pipe_fds[0]);
-    make_fd_non_blocking(m_pipe_fds[1]);
+    // Make both read and write ends of pipe nonblocking,
+    // this pipe is used for "communication" between the main thread and the listening thread.
+    m_pipe_fds = MUST(Core::System::pipe2(O_NONBLOCK));
 
     m_listening_thread = Threading::Thread::construct([this, &gui_event_loop = Core::EventLoop::current()]() {
         // The first file descriptor refers to the read end of the pipe,
@@ -47,11 +34,7 @@ ViewWidget::ViewWidget()
 
         while (true) {
             // Block until there is a fd ready to read.
-            int rc = poll(poll_fds, 2, -1);
-            if (rc == -1) {
-                perror("Error on polling file descriptors!\n");
-                return 1;
-            }
+            MUST(Core::System::poll(poll_fds, -1));
 
             // The listening thread is about to exit once there is a byte sent from the main thread.
             if (poll_fds[0].revents == POLLIN)
@@ -59,10 +42,12 @@ ViewWidget::ViewWidget()
 
             // Try reading keyboard events once there is data to read from the keyboard.
             if (poll_fds[1].revents == POLLIN) {
-                ::KeyEvent event;
-                ssize_t nread = read(m_keyboard_fd, &event, sizeof(::KeyEvent));
+                Array<u8, sizeof(::KeyEvent)> event_buffer;
+                ssize_t nread = MUST(Core::System::read(m_keyboard_fd, event_buffer.span()));
 
                 if (nread == sizeof(::KeyEvent)) {
+                    ::KeyEvent event;
+                    memcpy(&event, event_buffer.data(), sizeof(::KeyEvent));
                     if (event.is_press()) {
                         Threading::MutexLocker key_codes_locker { m_key_codes_mutex };
                         m_key_codes.append(event.key);
@@ -73,9 +58,6 @@ ViewWidget::ViewWidget()
                     }
                 } else if (nread == 0) {
                     continue;
-                } else if (nread == -1) {
-                    perror("Error on reading raw keyboard input!\n");
-                    return 1;
                 } else if ((size_t)nread < sizeof(::KeyEvent)) {
                     return 1;
                 }
@@ -97,16 +79,16 @@ ViewWidget::ViewWidget()
 ViewWidget::~ViewWidget()
 {
     // Write a byte to the write end of the pipe to "unblock" the listening thread :^)
-    char e = 'x';
-    write(m_pipe_fds[1], &e, sizeof(char));
+    constexpr static char e = 'x';
+    MUST(Core::System::write(m_pipe_fds[1], { &e, sizeof(char) }));
 
     // Join the listening thread.
     (void)m_listening_thread->join();
 
     // Close file descriptors.
-    close(m_keyboard_fd);
-    close(m_pipe_fds[0]);
-    close(m_pipe_fds[1]);
+    MUST(Core::System::close(m_keyboard_fd));
+    MUST(Core::System::close(m_pipe_fds[0]));
+    MUST(Core::System::close(m_pipe_fds[1]));
 }
 
 void ViewWidget::paint_event(GUI::PaintEvent& event)
