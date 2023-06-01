@@ -1067,6 +1067,11 @@ void ConnectionFromClient::pong()
     set_unresponsive(false);
 }
 
+Messages::WindowSever::GetGlobalKeyEventReponse ConnectionFromClient::get_global_key_event()
+{
+    return ScreenInput::the().get_key_event();
+}
+
 void ConnectionFromClient::set_global_cursor_position(Gfx::IntPoint position)
 {
     if (!Screen::main().rect().contains(position)) {

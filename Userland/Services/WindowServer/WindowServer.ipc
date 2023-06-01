@@ -1,6 +1,7 @@
 #include <LibCore/AnonymousBuffer.h>
 #include <LibGfx/ShareableBitmap.h>
 #include <LibGfx/Color.h>
+#include <Kernel/API/KeyCode.h>
 
 endpoint WindowServer
 {
@@ -159,6 +160,8 @@ endpoint WindowServer
 
     enable_display_link() =|
     disable_display_link() =|
+
+    get_global_key_event() => (::KeyEvent event)
 
     set_global_cursor_position(Gfx::IntPoint position) =|
     get_global_cursor_position() => (Gfx::IntPoint position)

@@ -49,10 +49,13 @@ public:
     void on_receive_mouse_data(MousePacket const&);
     void on_receive_keyboard_data(::KeyEvent);
 
+    ::KeyEvent get_key_event() const { return m_key_event; }
+
     Gfx::IntPoint cursor_location() const { return m_cursor_location; }
     void set_cursor_location(const Gfx::IntPoint point) { m_cursor_location = point; }
 
 private:
+    ::KeyEvent m_key_event;
     Gfx::IntPoint m_cursor_location;
     unsigned m_mouse_button_state { 0 };
     unsigned m_modifiers { 0 };

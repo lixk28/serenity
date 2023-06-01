@@ -1,0 +1,11 @@
+Settings window (opened by systray)
+[] #include <LibGUI/SettingsWindow.h>
+[] These preferences should be remembered using LibConfig Config::write and Config::read
+[] Set time for displaying keys using SpinBox
+[] Set font, font size, font color using FontPicker
+[] Set background color and opacity using ColorPicker and Slider
+[] Select Show Modifiers && Combine keys using CheckBox and ComboBox
+[] Compress repeat key presses after N presses using SpinBox
+
+System Tray
+[] #include <LibGUI/Tray.h>

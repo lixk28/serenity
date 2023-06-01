@@ -7,6 +7,7 @@ serenity_component(
 set(SOURCES
     main.cpp
     ViewWidget.cpp
+    PreferencesDialog.cpp
 )
 
 serenity_app(ScreenKey ICON filetype-executable)
