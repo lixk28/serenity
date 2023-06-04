@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include "TerminalChangeListener.h"
+#include "TerminalTabWidget.h"
+#include "TerminalUtilities.h"
 #include <AK/FixedArray.h>
 #include <AK/QuickSort.h>
 #include <AK/URL.h>
 #include <LibConfig/Client.h>
-#include <LibConfig/Listener.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/Directory.h>
 #include <LibCore/System.h>
@@ -47,70 +49,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-class TerminalChangeListener : public Config::Listener {
-public:
-    TerminalChangeListener(VT::TerminalWidget& parent_terminal)
-        : m_parent_terminal(parent_terminal)
-    {
-    }
-
-    virtual void config_bool_did_change(StringView domain, StringView group, StringView key, bool value) override
-    {
-        VERIFY(domain == "Terminal");
-
-        if (group == "Terminal") {
-            if (key == "ShowScrollBar")
-                m_parent_terminal.set_show_scrollbar(value);
-            else if (key == "ConfirmClose" && on_confirm_close_changed)
-                on_confirm_close_changed(value);
-        } else if (group == "Cursor" && key == "Blinking") {
-            m_parent_terminal.set_cursor_blinking(value);
-        }
-    }
-
-    virtual void config_string_did_change(StringView domain, StringView group, StringView key, StringView value) override
-    {
-        VERIFY(domain == "Terminal");
-
-        if (group == "Window" && key == "Bell") {
-            auto bell_mode = VT::TerminalWidget::BellMode::Visible;
-            if (value == "AudibleBeep")
-                bell_mode = VT::TerminalWidget::BellMode::AudibleBeep;
-            if (value == "Visible")
-                bell_mode = VT::TerminalWidget::BellMode::Visible;
-            if (value == "Disabled")
-                bell_mode = VT::TerminalWidget::BellMode::Disabled;
-            m_parent_terminal.set_bell_mode(bell_mode);
-        } else if (group == "Text" && key == "Font") {
-            auto font = Gfx::FontDatabase::the().get_by_name(value);
-            if (font.is_null())
-                font = Gfx::FontDatabase::default_fixed_width_font();
-            m_parent_terminal.set_font_and_resize_to_fit(*font);
-            m_parent_terminal.apply_size_increments_to_window(*m_parent_terminal.window());
-            m_parent_terminal.window()->resize(m_parent_terminal.size());
-        } else if (group == "Cursor" && key == "Shape") {
-            auto cursor_shape = VT::TerminalWidget::parse_cursor_shape(value).value_or(VT::CursorShape::Block);
-            m_parent_terminal.set_cursor_shape(cursor_shape);
-        }
-    }
-
-    virtual void config_i32_did_change(StringView domain, StringView group, StringView key, i32 value) override
-    {
-        VERIFY(domain == "Terminal");
-
-        if (group == "Terminal" && key == "MaxHistorySize") {
-            m_parent_terminal.set_max_history_size(value);
-        } else if (group == "Window" && key == "Opacity") {
-            m_parent_terminal.set_opacity(value);
-        }
-    }
-
-    Function<void(bool)> on_confirm_close_changed;
-
-private:
-    VT::TerminalWidget& m_parent_terminal;
-};
-
 static void utmp_update(DeprecatedString const& tty, pid_t pid, bool create)
 {
     int utmpupdate_pid = fork();
@@ -130,109 +68,6 @@ static void utmp_update(DeprecatedString const& tty, pid_t pid, bool create)
         int status = 0;
         if (waitpid(utmpupdate_pid, &status, 0) < 0) {
             int err = errno;
-            if (err == EINTR)
-                goto wait_again;
-            perror("waitpid");
-            return;
-        }
-        if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-            dbgln("Terminal: utmpupdate exited with status {}", WEXITSTATUS(status));
-        else if (WIFSIGNALED(status))
-            dbgln("Terminal: utmpupdate exited due to unhandled signal {}", WTERMSIG(status));
-    }
-}
-
-static ErrorOr<void> run_command(DeprecatedString command, bool keep_open)
-{
-    DeprecatedString shell = "/bin/Shell";
-    auto* pw = getpwuid(getuid());
-    if (pw && pw->pw_shell) {
-        shell = pw->pw_shell;
-    }
-    endpwent();
-
-    Vector<StringView> arguments;
-    arguments.append(shell);
-    if (!command.is_empty()) {
-        if (keep_open)
-            arguments.append("--keep-open"sv);
-        arguments.append("-c"sv);
-        arguments.append(command);
-    }
-    auto env = TRY(FixedArray<StringView>::create({ "TERM=xterm"sv, "PAGER=more"sv, "PATH="sv DEFAULT_PATH_SV }));
-    TRY(Core::System::exec(shell, arguments, Core::System::SearchInPath::No, env.span()));
-    VERIFY_NOT_REACHED();
-}
-
-static ErrorOr<NonnullRefPtr<GUI::Window>> create_find_window(VT::TerminalWidget& terminal)
-{
-    auto window = TRY(GUI::Window::try_create(&terminal));
-    window->set_window_mode(GUI::WindowMode::RenderAbove);
-    window->set_title("Find in Terminal");
-    window->set_resizable(false);
-    window->resize(300, 90);
-
-    auto main_widget = TRY(window->set_main_widget<GUI::Widget>());
-    main_widget->set_fill_with_background_color(true);
-    main_widget->set_background_role(ColorRole::Button);
-    TRY(main_widget->try_set_layout<GUI::VerticalBoxLayout>(4));
-
-    auto find = TRY(main_widget->try_add<GUI::Widget>());
-    TRY(find->try_set_layout<GUI::HorizontalBoxLayout>(4));
-    find->set_fixed_height(30);
-
-    auto find_textbox = TRY(find->try_add<GUI::TextBox>());
-    find_textbox->set_fixed_width(230);
-    find_textbox->set_focus(true);
-    if (terminal.has_selection())
-        find_textbox->set_text(terminal.selected_text().replace("\n"sv, " "sv, ReplaceMode::All));
-    auto find_backwards = TRY(find->try_add<GUI::Button>());
-    find_backwards->set_fixed_width(25);
-    find_backwards->set_icon(TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/upward-triangle.png"sv)));
-    auto find_forwards = TRY(find->try_add<GUI::Button>());
-    find_forwards->set_fixed_width(25);
-    find_forwards->set_icon(TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/downward-triangle.png"sv)));
-
-    find_textbox->on_return_pressed = [find_backwards] {
-        find_backwards->click();
-    };
-
-    find_textbox->on_shift_return_pressed = [find_forwards] {
-        find_forwards->click();
-    };
-
-    auto match_case = TRY(main_widget->try_add<GUI::CheckBox>(TRY("Case sensitive"_string)));
-    auto wrap_around = TRY(main_widget->try_add<GUI::CheckBox>(TRY("Wrap around"_string)));
-
-    find_backwards->on_click = [&terminal, find_textbox, match_case, wrap_around](auto) {
-        auto needle = find_textbox->text();
-        if (needle.is_empty()) {
-            return;
-        }
-
-        auto found_range = terminal.find_previous(needle, terminal.normalized_selection().start(), match_case->is_checked(), wrap_around->is_checked());
-
-        if (found_range.is_valid()) {
-            terminal.scroll_to_row(found_range.start().row());
-            terminal.set_selection(found_range);
-        }
-    };
-    find_forwards->on_click = [&terminal, find_textbox, match_case, wrap_around](auto) {
-        auto needle = find_textbox->text();
-        if (needle.is_empty()) {
-            return;
-        }
-
-        auto found_range = terminal.find_next(needle, terminal.normalized_selection().end(), match_case->is_checked(), wrap_around->is_checked());
-
-        if (found_range.is_valid()) {
-            terminal.scroll_to_row(found_range.start().row());
-            terminal.set_selection(found_range);
-        }
-    };
-
-    return window;
-}
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
@@ -272,7 +107,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         return 1;
     }
     if (shell_pid == 0) {
-        close(ptm_fd);
+        close(ptm_fd); // this line is redundent
         if (!command_to_execute.is_empty())
             TRY(run_command(command_to_execute, keep_open));
         else
@@ -289,57 +124,13 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     window->set_title("Terminal");
     window->set_obey_widget_min_size(false);
 
-    auto terminal = TRY(window->set_main_widget<VT::TerminalWidget>(ptm_fd, true));
-    terminal->on_command_exit = [&] {
-        app->quit(0);
-    };
-    terminal->on_title_change = [&](auto title) {
-        window->set_title(title);
-    };
-    terminal->on_terminal_size_change = [&](auto size) {
-        window->resize(size);
-    };
-    terminal->apply_size_increments_to_window(*window);
-    window->set_icon(app_icon.bitmap_for_size(16));
-
-    Config::monitor_domain("Terminal");
-    auto should_confirm_close = Config::read_bool("Terminal"sv, "Terminal"sv, "ConfirmClose"sv, true);
-    TerminalChangeListener listener { terminal };
-
-    auto bell = Config::read_string("Terminal"sv, "Window"sv, "Bell"sv, "Visible"sv);
-    if (bell == "AudibleBeep") {
-        terminal->set_bell_mode(VT::TerminalWidget::BellMode::AudibleBeep);
-    } else if (bell == "Disabled") {
-        terminal->set_bell_mode(VT::TerminalWidget::BellMode::Disabled);
-    } else {
-        terminal->set_bell_mode(VT::TerminalWidget::BellMode::Visible);
-    }
-
-    auto cursor_shape = VT::TerminalWidget::parse_cursor_shape(Config::read_string("Terminal"sv, "Cursor"sv, "Shape"sv, "Block"sv)).value_or(VT::CursorShape::Block);
-    terminal->set_cursor_shape(cursor_shape);
-
-    auto cursor_blinking = Config::read_bool("Terminal"sv, "Cursor"sv, "Blinking"sv, true);
-    terminal->set_cursor_blinking(cursor_blinking);
-
-    auto find_window = TRY(create_find_window(terminal));
-
-    auto new_opacity = Config::read_i32("Terminal"sv, "Window"sv, "Opacity"sv, 255);
-    terminal->set_opacity(new_opacity);
-    window->set_has_alpha_channel(new_opacity < 255);
-
-    auto new_scrollback_size = Config::read_i32("Terminal"sv, "Terminal"sv, "MaxHistorySize"sv, terminal->max_history_size());
-    terminal->set_max_history_size(new_scrollback_size);
-
-    auto show_scroll_bar = Config::read_bool("Terminal"sv, "Terminal"sv, "ShowScrollBar"sv, true);
-    terminal->set_show_scrollbar(show_scroll_bar);
+    auto tab_widget = TRY(window->set_main_widget<TerminalTabWidget>());
+    TRY(tab_widget->add_tab(TRY(VT::TerminalWidget::try_create(ptm_fd, true)), "Tab1"_short_string));
 
     auto open_settings_action = GUI::Action::create("Terminal &Settings", TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/settings.png"sv)),
         [&](auto&) {
             GUI::Process::spawn_or_show_error(window, "/bin/TerminalSettings"sv);
         });
-
-    TRY(terminal->context_menu().try_add_separator());
-    TRY(terminal->context_menu().try_add_action(open_settings_action));
 
     auto file_menu = TRY(window->try_add_menu("&File"_short_string));
     TRY(file_menu->try_add_action(GUI::Action::create("Open New &Terminal", { Mod_Ctrl | Mod_Shift, Key_N }, TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/app-terminal.png"sv)), [&](auto&) {
@@ -348,6 +139,8 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
 
     TRY(file_menu->try_add_action(open_settings_action));
     TRY(file_menu->try_add_separator());
+
+    // TODO: Add action {New tab, Close tab} in file_menu
 
     auto tty_has_foreground_process = [&] {
         pid_t fg_pid = tcgetpgrp(ptm_fd);
@@ -396,23 +189,23 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     TRY(edit_menu->try_add_separator());
     TRY(edit_menu->try_add_action(GUI::Action::create("&Find...", { Mod_Ctrl | Mod_Shift, Key_F }, TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/find.png"sv)),
         [&](auto&) {
-            find_window->show();
-            find_window->move_to_front();
+            tab_widget->find_window().show();
+            tab_widget->find_window().move_to_front();
         })));
 
     auto view_menu = TRY(window->try_add_menu("&View"_short_string));
     TRY(view_menu->try_add_action(GUI::CommonActions::make_fullscreen_action([&](auto&) {
         window->set_fullscreen(!window->is_fullscreen());
     })));
-    TRY(view_menu->try_add_action(terminal->clear_including_history_action()));
+    TRY(view_menu->try_add_action(tab_widget->current_tab().clear_including_history_action()));
 
     auto adjust_font_size = [&](float adjustment) {
-        auto& font = terminal->font();
+        auto& font = tab_widget->current_tab().font();
         auto new_size = max(5, font.presentation_size() + adjustment);
         if (auto new_font = Gfx::FontDatabase::the().get(font.family(), new_size, font.weight(), font.width(), font.slope())) {
-            terminal->set_font_and_resize_to_fit(*new_font);
-            terminal->apply_size_increments_to_window(*window);
-            window->resize(terminal->size());
+            tab_widget->current_tab().set_font_and_resize_to_fit(*new_font);
+            tab_widget->current_tab().apply_size_increments_to_window(*window);
+            window->resize(tab_widget->current_tab().size());
         }
     };
 
@@ -438,16 +231,20 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     };
 
     window->on_input_preemption_change = [&](bool is_preempted) {
-        terminal->set_logical_focus(!is_preempted);
+        tab_widget->current_tab().set_logical_focus(!is_preempted);
     };
 
     TRY(Core::System::unveil("/res", "r"));
     TRY(Core::System::unveil("/bin", "r"));
     TRY(Core::System::unveil("/proc", "r"));
+    TRY(Core::System::unveil("/bin/Shell", "x"));
     TRY(Core::System::unveil("/bin/Terminal", "x"));
     TRY(Core::System::unveil("/bin/TerminalSettings", "x"));
     TRY(Core::System::unveil("/bin/utmpupdate", "x"));
+    TRY(Core::System::unveil("/dev/ptmx", "rw"));
+    TRY(Core::System::unveil("/dev/pts", "rw"));
     TRY(Core::System::unveil("/etc/FileIconProvider.ini", "r"));
+    TRY(Core::System::unveil("/etc/passwd", "r"));
     TRY(Core::System::unveil("/tmp/session/%sid/portal/launch", "rw"));
     TRY(Core::System::unveil("/tmp/session/%sid/portal/config", "rw"));
     TRY(Core::System::unveil(nullptr, nullptr));

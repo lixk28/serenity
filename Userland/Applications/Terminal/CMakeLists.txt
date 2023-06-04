@@ -6,6 +6,9 @@ serenity_component(
 
 set(SOURCES
     main.cpp
+    TerminalChangeListener.cpp
+    TerminalTabWidget.cpp
+    TerminalUtilities.cpp
 )
 
 serenity_app(Terminal ICON app-terminal)
