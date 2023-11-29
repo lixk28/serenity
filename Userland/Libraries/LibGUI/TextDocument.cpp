@@ -176,11 +176,11 @@ void TextDocument::notify_did_change()
     m_regex_needs_update = true;
 }
 
-void TextDocument::set_all_cursors(TextPosition const& position)
+void TextDocument::set_all_cursors(TextPosition const& position, Vector<TextPosition> const& secondary_positions)
 {
     if (m_client_notifications_enabled) {
         for (auto* client : m_clients)
-            client->document_did_set_cursor(position);
+            client->document_did_set_cursor(position, secondary_positions);
     }
 }
 
@@ -694,11 +694,13 @@ TextDocumentUndoCommand::TextDocumentUndoCommand(TextDocument& document)
 {
 }
 
-InsertTextCommand::InsertTextCommand(TextDocument& document, ByteString const& text, TextPosition const& position)
+InsertTextCommand::InsertTextCommand(TextDocument& document, ByteString const& text, TextPosition const& position, Vector<TextPosition> const& secondary_positions)
     : TextDocumentUndoCommand(document)
     , m_text(text)
     , m_range({ position, position })
 {
+    for (TextPosition const& pos : secondary_positions)
+        m_secondary_ranges.append({ pos, pos });
 }
 
 ByteString InsertTextCommand::action_text() const
@@ -720,11 +722,22 @@ bool InsertTextCommand::merge_with(GUI::Command const& other)
     if (m_range.start().line() != m_range.end().line())
         return false;
 
+    if (m_secondary_ranges.size() != typed_other.m_secondary_ranges.size())
+        return false;
+    for (size_t i = 0; i < m_secondary_ranges.size(); i++) {
+        auto const& this_range = m_secondary_ranges[i];
+        auto const& the_other_range = typed_other.m_secondary_ranges[i];
+        if (this_range.end() != the_other_range.start() || this_range.start().line() != this_range.end().line())
+            return false;
+    }
+
     StringBuilder builder(m_text.length() + typed_other.m_text.length());
     builder.append(m_text);
     builder.append(typed_other.m_text);
     m_text = builder.to_byte_string();
     m_range.set_end(typed_other.m_range.end());
+    for (size_t i = 0; i < m_secondary_ranges.size(); i++)
+        m_secondary_ranges[i].set_end(typed_other.m_secondary_ranges[i].end());
 
     m_timestamp = MonotonicTime::now();
     return true;
@@ -780,19 +793,111 @@ void InsertTextCommand::perform_formatting(TextDocument::Client const& client)
     m_text = builder.to_byte_string();
 }
 
+Vector<size_t> InsertTextCommand::ascending_sorted_indices() const
+{
+    Vector<size_t> indices;
+    indices.resize(ncursors());
+    for (size_t i = 0; i < ncursors(); i++)
+        indices[i] = i;
+
+    quick_sort(indices, [&](size_t const& index1, size_t const& index2) -> bool {
+        return range_of_index(index1).start() < range_of_index(index2).start();
+    });
+
+    return indices;
+}
+
 void InsertTextCommand::redo()
 {
-    auto new_cursor = m_document.insert_at(m_range.start(), m_text, m_client);
-    // NOTE: We don't know where the range ends until after doing redo().
-    //       This is okay since we always do redo() after adding this to the undo stack.
-    m_range.set_end(new_cursor);
-    m_document.set_all_cursors(new_cursor);
+    TextPosition primary_redo_cursor;
+    Vector<TextPosition> secondary_redo_cursors;
+    secondary_redo_cursors.resize(m_secondary_ranges.size());
+
+    auto redo_cursor_of_index = [&](size_t index) -> TextPosition& {
+        return index == ncursors() - 1 ? primary_redo_cursor : secondary_redo_cursors[index];
+    };
+
+    Vector<size_t> indices = ascending_sorted_indices();
+
+    auto recompute_succeeding_ranges_after = [&](size_t const& i) {
+        TextRange const& inserted_range = range_of_index(indices[i]);
+        ReadonlySpan<size_t> succeeding_indices = indices.span().slice(i + 1);
+        for (size_t const& index : succeeding_indices) {
+            TextRange& range = range_of_index(index);
+            size_t delta_line = inserted_range.end().line() - inserted_range.start().line();
+            ssize_t delta_column = range.start().line() == inserted_range.start().line()
+                                 ? (ssize_t)inserted_range.end().column() - (ssize_t)inserted_range.start().column()
+                                 : 0;
+            range.set_start({
+                range.start().line() + delta_line,
+                range.start().column() + delta_column
+            });
+            range.set_end(range.start());
+        }
+    };
+
+    for (size_t i = 0; i < indices.size(); i++) {
+        size_t const& index = indices[i];
+        TextRange& range = range_of_index(index);
+        TextPosition new_cursor = m_document.insert_at(range.start(), m_text, m_client);
+        // NOTE: We don't know where the range ends until after doing redo().
+        //       This is okay since we always do redo() after adding this to the undo stack.
+        range.set_end(new_cursor);
+        redo_cursor_of_index(index) = new_cursor;
+
+        // NOTE: Succeeding cursors' position must be recomputed after inserting text at current cursor.
+        recompute_succeeding_ranges_after(i);
+    }
+
+    m_document.set_all_cursors(primary_redo_cursor, secondary_redo_cursors);
 }
 
 void InsertTextCommand::undo()
 {
-    m_document.remove(m_range);
-    m_document.set_all_cursors(m_range.start());
+    TextPosition primary_undo_cursor;
+    Vector<TextPosition> secondary_undo_cursors;
+    secondary_undo_cursors.resize(m_secondary_ranges.size());
+
+    auto undo_cursor_of_index = [&](size_t index) -> TextPosition& {
+        return index == ncursors() - 1 ? primary_undo_cursor : secondary_undo_cursors[index];
+    };
+
+    Vector<size_t> indices = ascending_sorted_indices();
+
+    auto recompute_succeeding_ranges_after = [&](size_t const& i) {
+        TextRange const& removed_range = range_of_index(indices[i]);
+        ReadonlySpan<size_t> succeeding_indices = indices.span().slice(i + 1);
+        for (size_t const& index : succeeding_indices) {
+            TextRange& range = range_of_index(index);
+            size_t delta_line = removed_range.end().line() - removed_range.start().line();
+            ssize_t delta_column_start = removed_range.end().line() == range.start().line()
+                                       ? (ssize_t)removed_range.end().column() - (ssize_t)removed_range.start().column()
+                                       : 0;
+            ssize_t delta_column_end = removed_range.end().line() == range.end().line()
+                                     ? delta_column_start
+                                     : 0;
+            range.set_start({
+                range.start().line() - delta_line,
+                range.start().column() - delta_column_start
+            });
+            range.set_end({
+                range.end().line() - delta_line,
+                range.end().column() - delta_column_end
+            });
+        }
+    };
+
+    for (size_t i = 0; i < indices.size(); i++) {
+        size_t const& index = indices[i];
+        TextRange& range = range_of_index(index);
+        m_document.remove(range);
+        undo_cursor_of_index(index) = range.start();
+
+        recompute_succeeding_ranges_after(i);
+        range.set_end(range.start());
+    }
+
+    m_document.set_all_cursors(primary_undo_cursor, secondary_undo_cursors);
 }
 
 RemoveTextCommand::RemoveTextCommand(TextDocument& document, ByteString const& text, TextRange const& range, TextPosition const& original_cursor_position)

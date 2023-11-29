@@ -12,6 +12,7 @@
 #include <AK/ScopeGuard.h>
 #include <AK/StringBuilder.h>
 #include <AK/TemporaryChange.h>
+#include <AK/QuickSort.h>
 #include <LibCore/Timer.h>
 #include <LibGUI/Action.h>
 #include <LibGUI/AutocompleteProvider.h>
@@ -310,6 +311,7 @@ void TextEditor::doubleclick_event(MouseEvent& event)
     if (!selection.is_whitespace())
         highlight_all_occurances_of(selection);
 
+    clear_secondary_cursors();
     set_cursor(m_selection.end());
     update();
     did_update_selection();
@@ -375,6 +377,15 @@ void TextEditor::mousedown_event(MouseEvent& event)
         return;
     }
 
+    if (event.modifiers() & Mod_Alt) {
+        if (!has_selection()) {
+            TextPosition position = compute_text_position_from_point(event.position());
+            add_or_remove_secondary_cursor(position);
+            update_secondary_cursors();
+            return;
+        }
+    }
+
     if (event.modifiers() & Mod_Shift) {
         if (!has_selection())
             m_selection.set(m_cursor, {});
@@ -383,6 +394,8 @@ void TextEditor::mousedown_event(MouseEvent& event)
     }
 
     m_in_drag_select = true;
+
+    clear_secondary_cursors();
 
     set_cursor_to_text_position(event.position());
 
@@ -440,6 +453,7 @@ void TextEditor::mousemove_event(MouseEvent& event)
 
 void TextEditor::select_current_line()
 {
+    clear_secondary_cursors();
     m_selection = document().range_for_entire_line(m_cursor.line());
     set_cursor(m_selection.end());
     update();
@@ -936,8 +950,12 @@ void TextEditor::paint_event(PaintEvent& event)
         });
     }
 
-    if (is_enabled() && is_focused() && !focus_preempted() && m_cursor_state && !is_displayonly())
+    if (is_enabled() && is_focused() && !focus_preempted() && m_cursor_state && !is_displayonly()) {
         painter.fill_rect(cursor_content_rect(), palette().text_cursor());
+        for (TextPosition const& cursor : m_secondary_cursors) {
+            painter.fill_rect(content_rect_for_position(cursor), palette().text_cursor());
+        }
+    }
 }
 
 Optional<UISize> TextEditor::calculated_min_size() const
@@ -957,6 +975,7 @@ void TextEditor::select_all()
     TextPosition end_of_document { line_count() - 1, line(line_count() - 1).length() };
     m_selection.set(end_of_document, start_of_document);
     did_update_selection();
+    clear_secondary_cursors();
     set_cursor(start_of_document);
     update();
 }
@@ -1108,6 +1127,8 @@ void TextEditor::keydown_event(KeyEvent& event)
             on_escape_pressed();
         else
             event.ignore();
+        clear_secondary_cursors();
+        update_cursor();
         return;
     }
 
@@ -1401,6 +1422,7 @@ void TextEditor::reset_cursor_blink()
 {
     m_cursor_state = true;
     update_cursor();
+    update_secondary_cursors();
     stop_timer();
     start_timer(500);
 }
@@ -1578,6 +1600,11 @@ void TextEditor::update_cursor()
     update(line_widget_rect(m_cursor.line()));
 }
 
+void TextEditor::update_secondary_cursors()
+{
+    for (TextPosition const& cursor : m_secondary_cursors)
+        update(line_widget_rect(cursor.line()));
+}
 void TextEditor::set_cursor(size_t line, size_t column)
 {
     set_cursor({ line, column });
@@ -1587,13 +1614,7 @@ void TextEditor::set_cursor(TextPosition const& a_position)
 {
     VERIFY(!lines().is_empty());
 
-    TextPosition position = a_position;
-
-    if (position.line() >= line_count())
-        position.set_line(line_count() - 1);
-
-    if (position.column() > lines()[position.line()]->length())
-        position.set_column(lines()[position.line()]->length());
+    TextPosition position = to_valid_cursor(a_position);
 
     if (m_cursor != position && is_visual_data_up_to_date()) {
         // NOTE: If the old cursor is no longer valid, repaint everything just in case.
@@ -1618,7 +1639,7 @@ void TextEditor::set_cursor(TextPosition const& a_position)
         update();
 }
 
-void TextEditor::set_cursor_to_text_position(Gfx::IntPoint position)
+TextPosition TextEditor::compute_text_position_from_point(Gfx::IntPoint position)
 {
     auto visual_position = text_position_at(position);
     size_t physical_column = 0;
@@ -1634,7 +1655,12 @@ void TextEditor::set_cursor_to_text_position(Gfx::IntPoint position)
         return IterationDecision::Continue;
     });
 
-    set_cursor({ visual_position.line(), physical_column });
+    return { visual_position.line(), physical_column };
+}
+
+void TextEditor::set_cursor_to_text_position(Gfx::IntPoint position)
+{
+    set_cursor(compute_text_position_from_point(position));
 }
 
 void TextEditor::set_cursor_to_end_of_visual_line()
@@ -1650,12 +1676,68 @@ void TextEditor::set_cursor_to_end_of_visual_line()
     });
 }
 
+void TextEditor::set_secondary_cursors(Vector<TextPosition> const& secondary_cursors)
+{
+    m_secondary_cursors = secondary_cursors;
+    for (TextPosition& cursor : m_secondary_cursors) {
+        cursor = to_valid_cursor(cursor);
+    }
+    update_secondary_cursors();
+}
+
+void TextEditor::clear_secondary_cursors()
+{
+    m_secondary_cursors.clear();
+    update_secondary_cursors();
+}
+
+void TextEditor::add_or_remove_secondary_cursor(TextPosition const& cursor)
+{
+    if (remove_secondary_cursor(cursor))
+        return;
+
+    add_secondary_cursor(cursor);
+}
+
+void TextEditor::add_secondary_cursor(TextPosition const& cursor)
+{
+    m_secondary_cursors.append(cursor);
+}
+
+bool TextEditor::remove_secondary_cursor(TextPosition const& cursor)
+{
+    if (cursor == m_cursor) {
+        if (m_secondary_cursors.is_empty())
+            return false;
+
+        m_cursor = m_secondary_cursors.first();
+        m_secondary_cursors.remove(0);
+        return true;
+    }
+
+    Optional<size_t> remove_index;
+    for (size_t i = 0; i < m_secondary_cursors.size(); i++) {
+        if (cursor == m_secondary_cursors[i]) {
+            remove_index = i;
+            break;
+        }
+    }
+
+    if (remove_index.has_value()) {
+        m_secondary_cursors.remove(remove_index.value());
+        return true;
+    }
+
+    return false;
+}
+
 void TextEditor::focusin_event(FocusEvent& event)
 {
     if (event.source() == FocusSource::Keyboard)
         select_all();
     m_cursor_state = true;
     update_cursor();
+    update_secondary_cursors();
     stop_timer();
     start_timer(500);
     if (on_focusin)
@@ -1674,8 +1756,10 @@ void TextEditor::focusout_event(FocusEvent&)
 void TextEditor::timer_event(Core::TimerEvent&)
 {
     m_cursor_state = !m_cursor_state;
-    if (is_focused())
+    if (is_focused()) {
         update_cursor();
+        update_secondary_cursors();
+    }
 }
 
 ErrorOr<void> TextEditor::write_to_file(StringView path)
@@ -1815,7 +1899,7 @@ void TextEditor::insert_at_cursor_or_replace_selection(StringView text)
         && clear_length > 0
         && current_line().leading_spaces() == clear_length;
 
-    execute<InsertTextCommand>(text, m_cursor);
+    execute<InsertTextCommand>(text, m_cursor, m_secondary_cursors);
 
     if (should_clear_last_line) { // If it does leave just whitespace, clear it.
         auto const original_cursor_position = cursor();
@@ -2084,15 +2168,14 @@ void TextEditor::recompute_all_visual_lines()
     update_content_size();
 }
 
-void TextEditor::ensure_cursor_is_valid()
+TextPosition TextEditor::to_valid_cursor(TextPosition const& a_position)
 {
-    auto new_cursor = m_cursor;
-    if (new_cursor.line() >= line_count())
-        new_cursor.set_line(line_count() - 1);
-    if (new_cursor.column() > line(new_cursor.line()).length())
-        new_cursor.set_column(line(new_cursor.line()).length());
-    if (m_cursor != new_cursor)
-        set_cursor(new_cursor);
+    TextPosition position = a_position;
+    if (position.line() >= line_count())
+        position.set_line(line_count() - 1);
+    if (position.column() > lines()[position.line()]->length())
+        position.set_column(lines()[position.line()]->length());
+    return position;
 }
 
 size_t TextEditor::visual_line_containing(size_t line_index, size_t column) const
@@ -2323,9 +2406,10 @@ void TextEditor::document_did_set_text(AllowCallback allow_callback)
     document_did_change(allow_callback);
 }
 
-void TextEditor::document_did_set_cursor(TextPosition const& position)
+void TextEditor::document_did_set_cursor(TextPosition const& position, Vector<TextPosition> const& secondary_positions = {})
 {
     set_cursor(position);
+    set_secondary_cursors(secondary_positions);
 }
 
 void TextEditor::cursor_did_change()

@@ -50,7 +50,7 @@ public:
         virtual void document_did_remove_all_lines() = 0;
         virtual void document_did_change(AllowCallback = AllowCallback::Yes) = 0;
         virtual void document_did_set_text(AllowCallback = AllowCallback::Yes) = 0;
-        virtual void document_did_set_cursor(TextPosition const&) = 0;
+        virtual void document_did_set_cursor(TextPosition const&, Vector<TextPosition> const& = {}) = 0;
         virtual void document_did_update_undo_stack() = 0;
 
         virtual bool is_automatic_indentation_enabled() const = 0;
@@ -121,7 +121,7 @@ public:
     UndoStack const& undo_stack() const { return m_undo_stack; }
 
     void notify_did_change();
-    void set_all_cursors(TextPosition const&);
+    void set_all_cursors(TextPosition const&, Vector<TextPosition> const& = {});
 
     TextPosition insert_at(TextPosition const&, u32, Client const* = nullptr);
     TextPosition insert_at(TextPosition const&, StringView, Client const* = nullptr);
@@ -173,7 +173,7 @@ protected:
 
 class InsertTextCommand : public TextDocumentUndoCommand {
 public:
-    InsertTextCommand(TextDocument&, ByteString const&, TextPosition const&);
+    InsertTextCommand(TextDocument&, ByteString const&, TextPosition const&, Vector<TextPosition> const& = {});
     virtual ~InsertTextCommand() = default;
     virtual void perform_formatting(TextDocument::Client const&) override;
     virtual void undo() override;
@@ -182,10 +182,18 @@ public:
     virtual ByteString action_text() const override;
     ByteString const& text() const { return m_text; }
     TextRange const& range() const { return m_range; }
+    size_t ncursors() const { return m_secondary_ranges.size() + 1; }
 
 private:
+    Vector<size_t> ascending_sorted_indices() const;
+    // Note: [0, ncursors - 1) are indices of secondary cursors perfectly mapped to indices of m_secondary_ranges.
+    //       ncursors - 1 is just a "magic number" used to indicate the primary cursor.
+    TextRange& range_of_index(size_t index) { return index == ncursors() - 1 ? m_range : m_secondary_ranges[index]; }
+    TextRange const& range_of_index(size_t index) const { return index == ncursors() - 1 ? m_range : m_secondary_ranges[index]; }
+
     ByteString m_text;
     TextRange m_range;
+    Vector<TextRange> m_secondary_ranges;
 };
 
 class RemoveTextCommand : public TextDocumentUndoCommand {

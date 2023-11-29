@@ -196,6 +196,8 @@ public:
 
     void add_custom_context_menu_action(Action&);
 
+    TextPosition compute_text_position_from_point(Gfx::IntPoint position);
+
     void set_cursor_and_focus_line(size_t line, size_t column);
     void set_cursor(size_t line, size_t column);
     virtual void set_cursor(TextPosition const&);
@@ -225,6 +227,12 @@ public:
     void did_update_selection();
     void did_change(AllowCallback = AllowCallback::Yes);
     void update_cursor();
+    void update_secondary_cursors();
+    void add_or_remove_secondary_cursor(TextPosition const&);
+    void add_secondary_cursor(TextPosition const&);
+    bool remove_secondary_cursor(TextPosition const&);
+    void set_secondary_cursors(Vector<TextPosition> const&);
+    void clear_secondary_cursors();
 
     void add_code_point(u32 code_point);
     void reset_cursor_blink();
@@ -303,7 +311,7 @@ private:
     virtual void document_did_remove_all_lines() override;
     virtual void document_did_change(AllowCallback = AllowCallback::Yes) override;
     virtual void document_did_set_text(AllowCallback = AllowCallback::Yes) override;
-    virtual void document_did_set_cursor(TextPosition const&) override;
+    virtual void document_did_set_cursor(TextPosition const&, Vector<TextPosition> const&) override;
     virtual void document_did_update_undo_stack() override;
 
     // ^Syntax::HighlighterClient
@@ -369,7 +377,7 @@ private:
     Gfx::IntRect folding_indicator_rect_in_inner_coordinates() const;
     Gfx::IntRect visible_text_rect_in_inner_coordinates() const;
     void recompute_all_visual_lines();
-    void ensure_cursor_is_valid();
+    TextPosition to_valid_cursor(TextPosition const&);
     void rehighlight_if_needed();
 
     size_t visual_line_containing(size_t line_index, size_t column) const;
@@ -396,6 +404,7 @@ private:
     Mode m_mode { Editable };
 
     TextPosition m_cursor;
+    Vector<TextPosition> m_secondary_cursors;
     Gfx::TextAlignment m_text_alignment { Gfx::TextAlignment::CenterLeft };
     bool m_cursor_state { true };
     bool m_in_drag_select { false };
